@@ -1,0 +1,147 @@
+import numpy as np
+import time
+from esp_bridge import ESPActuatorController as ActuatorController
+from robot_core.robot_model import Robot
+
+# Global stop flag for the Stop Code button
+stop_requested = False
+
+def stop_code():
+    """
+    Function called by the GUI when user presses the Stop Code button.
+    """
+    global stop_requested
+    stop_requested = True
+
+def setup_robot(actuator_controller, robot):
+    """
+    Initialize and setup the robot for operation.
+    """
+    global stop_requested
+    joint_ids = [1, 2, 3]
+    
+    # Enable all joints in position control mode
+    for joint_id in joint_ids:
+        if stop_requested:
+            return False
+        actuator_controller.disable_torque(joint_id)
+        time.sleep(0.01)
+        actuator_controller.change_operating_mode(joint_id, 3)  # Position mode
+        time.sleep(0.01)
+        actuator_controller.enable_torque(joint_id)
+        time.sleep(0.01)
+    
+    return True
+
+def move_to_position(actuator_controller, robot, target_position, target_orientation=None):
+    """
+    Move end-effector to a specific 2D position.
+    """
+    global stop_requested
+    
+    if target_orientation is None:
+        # Default orientation facing forward
+        target_orientation = np.array([
+            [1, 0, 0],
+            [0, 1, 0], 
+            [0, 0, 1]
+        ])
+    
+    # Compute joint angles using inverse kinematics
+    joint_angles = robot.inverse_kinematics(target_position, target_orientation)
+    joint_angles = robot.apply_joint_limits(joint_angles)
+    
+    joint_ids = [1, 2, 3]
+    
+    # Move all joints to target position
+    for i, joint_id in enumerate(joint_ids):
+        if stop_requested:
+            return False
+        raw_angle = actuator_controller.relative_joint_angle_to_raw(joint_id, joint_angles[i])
+        actuator_controller.set_position(joint_id, raw_angle)
+    
+    # Wait for movement to complete
+    time.sleep(2)
+    return True
+
+def strike_coin(actuator_controller, robot):
+    """
+    Execute the carom strike: from (0,15) to coin at (10,15) then to top-right.
+    """
+    global stop_requested
+    
+    # Define positions (convert from cm to meters for robot)
+    start_pos = np.array([15, 15, 0.0])      # Starting position (0, 15cm)
+    coin_pos = np.array([0.10, 0.15, 0.0])      # Coin position (10cm, 15cm)
+    target_pos = np.array([0.20, 0.20, 0.0])    # Target top-right (20cm, 20cm)
+    
+    print("Moving to starting position (0, 15cm)...")
+    if not move_to_position(actuator_controller, robot, start_pos):
+        return
+    
+    print("Approaching coin at (10cm, 15cm)...")
+    if not move_to_position(actuator_controller, robot, coin_pos):
+        return
+    
+    # Calculate strike direction from coin to target
+    strike_direction = target_pos - coin_pos
+    strike_direction = strike_direction / np.linalg.norm(strike_direction)
+    
+    # Strike position (move beyond the coin toward target)
+    strike_pos = coin_pos + 0.08 * strike_direction  # 8cm strike
+    
+    print(f"Striking coin toward target at ({strike_pos[0]:.2f}, {strike_pos[1]:.2f})...")
+    if not move_to_position(actuator_controller, robot, strike_pos):
+        return
+    
+    print("Strike completed!")
+    time.sleep(1)
+
+def run_challenge(actuator_controller):
+    """
+    Main function called by the ROBOX system to run the carom challenge.
+    """
+    global stop_requested
+    stop_requested = False
+    
+    try:
+        # Initialize robot model
+        robot = Robot.from_config('robot_parameters.json')
+        
+        # Setup robot for operation
+        if not setup_robot(actuator_controller, robot):
+            return
+        
+        print("Starting carom challenge...")
+        print("Start: (0cm, 15cm)")
+        print("Coin: (10cm, 15cm)") 
+        print("Target: Top-right corner")
+        print("-" * 40)
+        
+        # Execute the strike sequence
+        strike_coin(actuator_controller, robot)
+        
+        if not stop_requested:
+            print("Carom challenge completed successfully!")
+        else:
+            print("Challenge stopped by user")
+        
+    except Exception as e:
+        print(f"Error during carom challenge: {e}")
+    
+    finally:
+        # Cleanup - disable all motors
+        try:
+            joint_ids = [1, 2, 3]
+            for joint_id in joint_ids:
+                actuator_controller.disable_torque(joint_id)
+                time.sleep(0.01)
+            print("Robot motors disabled")
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+
+# For testing outside the ROBOX environment
+if __name__ == "__main__":
+    actuator_controller = ActuatorController('actuator_config.json')
+    run_challenge(actuator_controller)
+    actuator_controller.close()
